@@ -26,6 +26,8 @@ trait EventLoggerTrait
     const GITHUB  = 'https://github.com/vzgcoders/discordphp-eventlogger';
     const CREDITS = 'DiscordPHP EventLogger by Valithor Obsidion';
     private readonly string $footer;
+    private Discord $discord;
+    private bool $setup = false;
 
     private int $color = 0xE1452D;
     /**
@@ -43,38 +45,20 @@ trait EventLoggerTrait
         'ready' => null,
     ];
 
-    public function __construct(
-        private Discord &$discord,
-        private array $events = [
-            'CHANNEL_CREATE',
-            'CHANNEL_DELETE',
-            'CHANNEL_UPDATE',
-            'GUILD_BAN_ADD',
-            'GUILD_BAN_REMOVE',
-            'GUILD_MEMBER_ADD',
-            'GUILD_MEMBER_REMOVE',
-            'GUILD_MEMBER_UPDATE',
-            'GUILD_ROLE_CREATE',
-            'GUILD_ROLE_DELETE',
-            'GUILD_ROLE_UPDATE',
-            'MESSAGE_DELETE',
-        ]
-    )
-    {
-        $this->footer = self::GITHUB . PHP_EOL . self::CREDITS;
-        $this->afterConstruct($events);
-    }
-
     /**
      * This method is called after the constructor.
      * It attempts to retrieve log channels from environment variables.
      *
      * @return void
      */
-    private function afterConstruct(array $events): void
+    public function afterConstruct(Discord &$discord, array $events): void
     {
+        if ($this->setup) return;
+        if (!isset($this->discord)) $this->discord = $discord;
+        $this->footer = self::GITHUB . PHP_EOL . self::CREDITS;
         $this->getLogChannelsFromEnv();
         $this->createDefaultEventListeners($events);
+        $this->setup = true;
     }
 
     /**
