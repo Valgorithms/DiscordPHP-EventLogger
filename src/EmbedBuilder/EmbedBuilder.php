@@ -6,12 +6,9 @@
  * Copyright (c) 2024-present Valithor Obsidion <valithor@valzargaming.com>
  */
 
-namespace EventLogger;
+namespace EmbedBuilder;
 
-use EmbedBuilder\EmbedBuilderTrait;
-
-class EventLogger implements EventLoggerInterface
+class EmbedBuilder implements EmbedBuilderInterface
 {
-    use EventLoggerTrait;
     use EmbedBuilderTrait;
 }

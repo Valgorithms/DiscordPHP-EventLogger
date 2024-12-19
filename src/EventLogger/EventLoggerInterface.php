@@ -5,3 +5,9 @@
  *
  * Copyright (c) 2024-present Valithor Obsidion <valithor@valzargaming.com>
  */
+
+namespace EventLogger;
+
+interface EventLoggerInterface
+{
+}

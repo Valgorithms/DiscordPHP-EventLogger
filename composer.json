@@ -1,6 +1,6 @@
 {
     "name": "valgorithms/discord-php-eventlogger",
-    "description": "DiscordPHP EventLogger is a tool designed to generate user logs for the DiscordPHP API Library.",
+    "description": "DiscordPHP EventLogger is a tool designed to generate guild specific logs for the DiscordPHP API Library.",
     "keywords": ["discordphp", "discord", "php", "event logger", "logging"],
     "license": "MIT",
     "authors": [
@@ -11,13 +11,15 @@
     ],
     "require": {
         "php": ">=8.0",
-        "team-reflex/discord-php": "^10.0.0"
+        "team-reflex/discord-php": "^10.0.0 || dev-master"
     },
     "minimum-stability": "dev",
     "prefer-stable": true,
     "autoload": {
         "psr-4": {
-            "EventLogger\\": "src/EventLogger/"
+            "EventLogger\\": "src/EventLogger/",
+            "EmbedBuilder\\": "src/EmbedBuilder/",
+            "MessageBuilderHelper\\": "src/MessageBuilderHelper/"
         }
     }
 }
