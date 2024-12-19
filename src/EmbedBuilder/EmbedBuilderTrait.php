@@ -21,7 +21,7 @@ trait EmbedBuilderTrait
      * 
      * @return Embed The created Embed object.
      */
-    private static function createEmbed(
+    public static function new(
         Discord $discord,
         string|int|null $color = null,
         string|null $footer = null
@@ -47,7 +47,7 @@ trait EmbedBuilderTrait
      * @return Embed The filled Embed object.
      * @throws \Exception If both Discord and Embed instances are null.
      */
-    public static function new(
+    public static function fill(
         Embed|null $embed = null,
         string|null $title = null, // Event
         string|null $description = null,
