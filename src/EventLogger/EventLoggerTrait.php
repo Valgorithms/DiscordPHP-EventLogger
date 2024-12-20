@@ -30,7 +30,7 @@ trait EventLoggerTrait
         'edited_timestamp'
     ];
 
-    const GITHUB  = 'https://github.com/vzgcoders/discordphp-eventlogger';
+    const GITHUB  = 'https://github.com/valgorithms/discordphp-eventlogger';
     const CREDITS = 'DiscordPHP EventLogger by Valithor Obsidion';
     private readonly string $footer;
     private Discord $discord;
