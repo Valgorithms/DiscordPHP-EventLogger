@@ -31,6 +31,7 @@ class EventLogger implements EventLoggerInterface
             'GUILD_ROLE_DELETE',
             'GUILD_ROLE_UPDATE',
             'MESSAGE_DELETE',
+            'MESSAGE_UPDATE',
         ]
     )
     {
