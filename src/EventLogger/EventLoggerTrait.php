@@ -234,15 +234,22 @@ trait EventLoggerTrait
 
         if (is_string($content)) return $channel->sendMessage(MessageBuilder::new()->setContent($content));
 
-        if (is_object($content) && is_object($old_content) && get_class($content) === get_class($old_content)) {
-            $changes = self::arrayRecursiveDiff(json_decode(json_encode($content), true), json_decode(json_encode($old_content), true));
-            $changeDescriptions = array_map(fn($key, $value) => is_object($old_content) && method_exists($old_content, '__get') && is_object($old_content->$key) && method_exists($old_content->$key, '__toString') ? "$key changed from {$old_content->$key} to $value" : null, array_keys($changes), $changes);
-            $changeDescriptions = array_filter($changeDescriptions); // Remove null values
-            $description = implode(PHP_EOL, $changeDescriptions);
+        $description = '';
+        if (!empty($differences)) {
+            foreach ($differences as $key => $diff) {
+                if (is_array($diff)) {
+                    if (isset($diff['added']) && !empty($diff['added'])) $description .= "$key added: " . json_encode($diff['added']) . PHP_EOL;
+                    if (isset($diff['removed']) && !empty($diff['removed'])) $description .= "$key removed: " . json_encode($diff['removed']) . PHP_EOL;
+                    if (isset($diff['new']) && isset($diff['old'])) {
+                        $description .= "$key changed:" . PHP_EOL;
+                        $description .= "Old: `{$diff['old']}`" . PHP_EOL;
+                        $description .= "New: `{$diff['new']}`" . PHP_EOL;
+                    }
+                } else $description .= "$key: " . json_encode($diff) . PHP_EOL;
+            }
         } else $description = is_object($content) ? json_encode($content) : (is_array($content) ? json_encode($content) : $content);
-        
+
         if (! $description) return reject(new \Exception('No content to log'));
-        //if (strlen($description) <= 2000) return $channel->sendMessage(MessageBuilder::new()->setContent($description));
         if (strlen($description) <= 4096) return $channel->sendMessage(MessageBuilder::new()->addEmbed(EmbedBuilder::new($discord, $this->color, $this->footer)->setDescription($description)->setTitle($event)));
         return $channel->sendMessage(MessageBuilder::new()->addFileFromContent("$event.txt", $description));
     }
