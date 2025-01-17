@@ -100,9 +100,10 @@ trait EventLoggerTrait
         unset($this->log_channel_ids[$guild_id]);
     }
 
-    public static function getPartDifferences(object $newPart, ?object $oldPart): array
+    public function getPartDifferences(object $newPart, ?object $oldPart): array
     {
         if (! $oldPart) return [];
+        if ($newPart instanceof Message) return $this->handleMessages($newPart, $this->discord, $oldPart);
         if (!method_exists($newPart, 'getRawAttributes') || !method_exists($oldPart, 'getRawAttributes')) return [];
 
         $differences = [];
@@ -127,7 +128,7 @@ trait EventLoggerTrait
                     $removedItems = array_diff($oldItems, $newItems);
                     if (!empty($addedItems) || !empty($removedItems)) $differences[$key] = ['added' => $addedItems, 'removed' => $removedItems];
                 } elseif (is_object($newValue) && is_object($oldValue)) {
-                    $nestedDifferences = self::getPartDifferences($newValue, $oldValue);
+                    $nestedDifferences = $this->getPartDifferences($newValue, $oldValue);
                     if (!empty($nestedDifferences)) $differences[$key] = $nestedDifferences;
                 } elseif ($newValue !== $oldValue) $differences[$key] = ['new' => $newValue, 'old' => $oldValue];
             } else $differences[$key] = ['new' => $newValue, 'old' => null];
@@ -138,6 +139,53 @@ trait EventLoggerTrait
         return self::removeRedundantProperties($differences);
     }
 
+    public function handleMessages(mixed $message, Discord $discord, ?Message $oldMessage)
+    {
+        if (
+            ! $message instanceof Message ||
+            $message->author->id === $discord->id ||
+            $message->author->bot ||
+            ! $message->guild
+        ) {
+            return [];
+        }
+
+        $oldMessage = $oldMessage;
+
+        if (! $oldMessage || trim($message->content) === trim($oldMessage->content)) {
+            return;
+        }
+
+        return $this->diff($oldMessage->content, $message->content);
+    }
+
+    /**
+     * Get the difference between two strings.
+     */
+    public function diff(string $before, string $after): array
+    {
+        $beforeLines = array_map('trim', explode(PHP_EOL, trim($before)));
+        $afterLines = array_map('trim', explode(PHP_EOL, trim($after)));
+
+        $beforeDiff = array_map(static fn($line, $index) =>
+            isset($afterLines[$index])
+                ? ($line === $afterLines[$index] ? " {$line}" : "- {$line}")
+                : "- {$line}",
+            $beforeLines, array_keys($beforeLines));
+
+        $afterDiff = array_map(static fn($line, $index) =>
+            isset($beforeLines[$index])
+                ? ($line === $beforeLines[$index] ? " {$line}" : "+ {$line}")
+                : "+ {$line}",
+            $afterLines, array_keys($afterLines));
+
+        return [
+            'old' => "```diff" . PHP_EOL . implode(PHP_EOL, $beforeDiff) . PHP_EOL . "```",
+            'new' => "```diff" . PHP_EOL . implode(PHP_EOL, $afterDiff) . PHP_EOL . "```",
+        ];
+    }
+
+
     public static function removeRedundantProperties(array $array): array
     {
         return array_diff_key($array, array_flip(self::REDUNDANT_PREOPRTIES));
@@ -145,7 +193,7 @@ trait EventLoggerTrait
 
     public function getDifferences($newObject, $oldObject): array
     {
-        return self::getPartDifferences($newObject, $oldObject);
+        return $this->getPartDifferences($newObject, $oldObject);
     }
 
     private static function arrayRecursiveDiff(array $array1, array $array2): array
@@ -218,9 +266,15 @@ trait EventLoggerTrait
         string $event,
         string $guild_id,
         object|string $content,
-        object $old_content = null
+        object $old_content = null,
+        ?MessageBuilder $builder = null
     ): PromiseInterface
     {
+        if (! $channel_id = $this->log_channel_ids[$guild_id] ?? null) return reject(new \Exception('Discord Channel ID not configured'));
+        if (! $guild = $discord->guilds->get('id', $guild_id)) return reject(new \Exception('Discord Guild not found'));
+        if (! $channel = $guild->channels->get('id', $channel_id)) return reject(new \Exception('Discord Channel not found'));
+        if (! $builder) $builder = MessageBuilder::new();
+
         $differences = $this->getDifferences($content, $old_content);
         $discord->getLogger()->info("Logging event: $event, Guild ID: {$guild_id}, Differences: " . json_encode($differences), [
             'event' => $event,
@@ -228,30 +282,26 @@ trait EventLoggerTrait
             'differences' => $differences
         ]);
 
-        if (! $channel_id = $this->log_channel_ids[$guild_id] ?? null) return reject(new \Exception('Discord Channel ID not configured'));
-        if (! $guild = $discord->guilds->get('id', $guild_id)) return reject(new \Exception('Discord Guild not found'));
-        if (! $channel = $guild->channels->get('id', $channel_id)) return reject(new \Exception('Discord Channel not found'));
-
-        if (is_string($content)) return $channel->sendMessage(MessageBuilder::new()->setContent($content));
+        if (is_string($content)) return $channel->sendMessage($builder->setContent($content));
 
         $description = '';
-        if (!empty($differences)) {
+        if (! empty($differences)) {
             foreach ($differences as $key => $diff) {
                 if (is_array($diff)) {
                     if (isset($diff['added']) && !empty($diff['added'])) $description .= "$key added: " . json_encode($diff['added']) . PHP_EOL;
                     if (isset($diff['removed']) && !empty($diff['removed'])) $description .= "$key removed: " . json_encode($diff['removed']) . PHP_EOL;
                     if (isset($diff['new']) && isset($diff['old'])) {
                         $description .= "$key changed:" . PHP_EOL;
-                        $description .= "Old: `{$diff['old']}`" . PHP_EOL;
-                        $description .= "New: `{$diff['new']}`" . PHP_EOL;
+                        $description .= 'Old:' . PHP_EOL . $diff['old'] . PHP_EOL;
+                        $description .= 'New:' . PHP_EOL . $diff['new'] . PHP_EOL;
                     }
-                } else $description .= "$key: " . json_encode($diff) . PHP_EOL;
+                } else $description .= "$key: " . PHP_EOL . $diff . PHP_EOL;
             }
-        } else $description = is_object($content) ? json_encode($content) : (is_array($content) ? json_encode($content) : $content);
+        } //else $description = is_object($content) ? json_encode($content) : (is_array($content) ? json_encode($content) : $content);
 
         if (! $description) return reject(new \Exception('No content to log'));
-        if (strlen($description) <= 4096) return $channel->sendMessage(MessageBuilder::new()->addEmbed(EmbedBuilder::new($discord, $this->color, $this->footer)->setDescription($description)->setTitle($event)));
-        return $channel->sendMessage(MessageBuilder::new()->addFileFromContent("$event.txt", $description));
+        if (strlen($description) <= 4096) return $channel->sendMessage($builder->addEmbed(EmbedBuilder::new($discord, $this->color, $this->footer)->setDescription($description)->setTitle($event)));
+        return $channel->sendMessage($builder->addFileFromContent("$event.txt", $description));
     }
 
     /*
