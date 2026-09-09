@@ -1,18 +1,24 @@
 # DiscordPHP EventLogger
 
-DiscordPHP EventLogger is a tool designed to generate user logs for the DiscordPHP API Library. It logs various events such as member joins/leaves, message deletions, role updates, and more.
+DiscordPHP EventLogger is a drop-in audit logger for the [DiscordPHP](https://github.com/discord-php/DiscordPHP) library. It listens for gateway events and posts a formatted embed to each guild's configured log channel.
 
 ## Features
 
-- Logs member joins and leaves
-- Logs message deletions and updates
-- Logs role creations, deletions, and updates
-- Logs channel creations, deletions, and updates
-- Logs bans and unbans
+- Member joins / leaves / updates (nickname, roles, avatar)
+- Message deletions and edits (a line-by-line `diff` for edits, cached-content aware)
+- Role creations / deletions / updates
+- Channel creations / deletions / updates
+- Bans and unbans
+- Opt-in `USER_UPDATE`
+- Per-guild log channels, from an env var or set at runtime
+- Any default handler can be overridden with your own callable
+
+## Requirements
+
+- PHP 8.3+
+- `team-reflex/discord-php` ^10
 
 ## Installation
-
-To install the DiscordPHP EventLogger, you need to have Composer installed. Run the following command:
 
 ```bash
 composer require valgorithms/discord-php-eventlogger
@@ -20,63 +26,57 @@ composer require valgorithms/discord-php-eventlogger
 
 ## Usage
 
-### Configuration
-
-Set the `DISCORDPHP_EVENTLOGGER_GUILD_CHANNELS` environment variable to specify the guilds and their respective log channels. The value should be a comma-separated string where each entry is a guild-channel pair separated by a hyphen.
-
-Example:
-```
-DISCORDPHP_EVENTLOGGER_GUILD_CHANNELS=1077144430588469349-1077144432463314998,1253459964849164328-1253480680583860367
-```
-
-### Example
-
-Here is an example of how to use the EventLogger in your project:
-
 ```php
 require 'vendor/autoload.php';
 
 use Discord\Discord;
 use EventLogger\EventLogger;
 
-$discord = new Discord([
-    'token' => 'YOUR_DISCORD_BOT_TOKEN',
-]);
+$discord = new Discord(['token' => 'YOUR_DISCORD_BOT_TOKEN']);
 
-$events = [
-    'CHANNEL_CREATE',
-    'CHANNEL_DELETE',
-    'CHANNEL_UPDATE',
-    'GUILD_BAN_ADD',
-    'GUILD_BAN_REMOVE',
-    'GUILD_MEMBER_ADD',
-    'GUILD_MEMBER_REMOVE',
-    'GUILD_MEMBER_UPDATE',
+// Default event set (EventLogger::DEFAULT_EVENTS):
+$logger = new EventLogger($discord);
+
+// Or pick the events, and override a handler with your own callable
+// (it receives the gateway payload plus the Discord client):
+$logger = new EventLogger($discord, [
     'MESSAGE_DELETE',
-    'GUILD_ROLE_CREATE',
-    'GUILD_ROLE_DELETE',
-    'GUILD_ROLE_UPDATE',
-];
-
-$eventLogger = new EventLogger($discord, $events);
+    'GUILD_MEMBER_ADD',
+    'GUILD_BAN_ADD' => fn(\Discord\Parts\Guild\Ban $ban, Discord $discord) =>
+        $discord->getLogger()->notice("Banned {$ban->user} in {$ban->guild_id}"),
+]);
 
 $discord->run();
 ```
 
-### Custom Events
+### Configuring log channels
 
-You can add custom events by modifying the `createDefaultEventListeners` method in the `EventLoggerTrait` trait.
+Set `DISCORDPHP_EVENTLOGGER_GUILD_CHANNELS` to a comma-separated list of
+`guildId-channelId` pairs:
+
+```
+DISCORDPHP_EVENTLOGGER_GUILD_CHANNELS=1077144430588469349-1077144432463314998,1253459964849164328-1253480680583860367
+```
+
+Blank / malformed entries are ignored, and an unset variable is fine — add
+channels at runtime instead:
 
 ```php
-private function createDefaultEventListeners(array $events = []): void
-{
-    // Add your custom event listeners here
-}
+$logger->addLogChannel('1077144430588469349', '1077144432463314998');
+$logger->removeLogGuild('1077144430588469349');
+```
+
+## Development
+
+```bash
+composer install
+composer unit   # phpunit
+composer pint   # code style
 ```
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE.md) file for details.
+MIT — see [LICENSE.md](LICENSE.md).
 
 ## Credits
 

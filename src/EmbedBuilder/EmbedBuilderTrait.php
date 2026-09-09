@@ -1,4 +1,6 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 /*
  * This file is a part of the DiscordPHP EventLogger project.
@@ -16,17 +18,16 @@ trait EmbedBuilderTrait
     /**
      * Creates an Embed object with the specified footer and color.
      *
-     * @param bool|null $footer Whether to include the footer in the embed. Defaults to true.
-     * @param int|null $color The color of the embed. Defaults to null.
-     * 
+     * @param string|int|null $color  The colour of the embed (hex string or int). Defaults to none.
+     * @param string|null     $footer The footer text. Defaults to none.
+     *
      * @return Embed The created Embed object.
      */
     public static function new(
         Discord $discord,
         string|int|null $color = null,
         string|null $footer = null
-    ): Embed
-    {
+    ): Embed {
         return (new Embed($discord))
             ->setFooter($footer ?: '')
             ->setColor($color ?: null)
@@ -55,16 +56,21 @@ trait EmbedBuilderTrait
         Discord|null $discord = null,
         string|int|null $color = null,
         string|null $footer = null
-    ): Embed
-    {
-        if ($discord === null && $embed === null) throw new \Exception('Either Discord or Embed instance must be provided');
-        
-        $embed = $embed ?? self::createEmbed($discord, $color, $footer);
+    ): Embed {
+        if ($discord === null && $embed === null) {
+            throw new \Exception('Either Discord or Embed instance must be provided');
+        }
 
-        if ($title) $embed->setTitle($title);
-        if ($description) $embed->setDescription($description);
+        $embed = $embed ?? self::new($discord, $color, $footer);
 
-        array_walk($fields, fn($field) => isset($field['name'], $field['value']) ? $embed->addFieldValues($field['name'], $field['value'], $field['inline'] ?? false) : null);
+        if ($title) {
+            $embed->setTitle($title);
+        }
+        if ($description) {
+            $embed->setDescription($description);
+        }
+
+        array_walk($fields, fn ($field) => isset($field['name'], $field['value']) ? $embed->addFieldValues($field['name'], $field['value'], $field['inline'] ?? false) : null);
 
         return $embed;
     }

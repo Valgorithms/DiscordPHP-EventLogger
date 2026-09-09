@@ -2,6 +2,8 @@ composer.lock
 /vendor
 /build/
 /.phpdoc/
+/.phpunit.cache/
+/.php-cs-fixer.cache
 /tools/
 /phive.xml
 /.phive/
