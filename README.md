@@ -8,7 +8,7 @@ DiscordPHP EventLogger is a drop-in audit logger for the [DiscordPHP](https://gi
 - Message deletions and edits (a line-by-line `diff` for edits, cached-content aware)
 - Role creations / deletions / updates
 - Channel creations / deletions / updates
-- Bans and unbans
+- Bans, unbans and kicks, with the moderator and reason from the audit log
 - Opt-in `USER_UPDATE`
 - Per-guild log channels, from an env var or set at runtime
 - Any default handler can be overridden with your own callable
@@ -17,6 +17,11 @@ DiscordPHP EventLogger is a drop-in audit logger for the [DiscordPHP](https://gi
 
 - PHP 8.3+
 - `team-reflex/discord-php` ^10
+
+### Permissions
+
+To say who banned, unbanned or kicked a member and why, the bot needs **View Audit Log** in that guild.
+Without it these events are still logged, just without the moderator and reason.
 
 ## Installation
 
