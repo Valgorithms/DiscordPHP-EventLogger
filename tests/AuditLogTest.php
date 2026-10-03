@@ -13,11 +13,15 @@ namespace EventLogger\Tests;
 use Discord\Discord;
 use Discord\Http\Endpoint;
 use Discord\Http\Http;
+use Discord\Builders\MessageBuilder;
 use Discord\Parts\Guild\AuditLog\Entry;
+use Discord\Parts\Guild\Ban;
+use Discord\Parts\User\Member;
 use EventLogger\EventLoggerTrait;
 use PHPUnit\Framework\TestCase;
 use React\EventLoop\LoopInterface;
 use React\EventLoop\TimerInterface;
+use React\Promise\PromiseInterface;
 
 use function React\Promise\reject;
 use function React\Promise\resolve;
@@ -32,6 +36,9 @@ final class AuditLogTest extends TestCase
     private const float NOW = 1790000000.0;
 
     private object $logger;
+
+    /** @var array<string, callable> Listeners the logger registered on the mocked client. */
+    private array $listeners = [];
 
     protected function setUp(): void
     {
@@ -137,6 +144,103 @@ final class AuditLogTest extends TestCase
         $this->assertTrue($resolved);
     }
 
+    public function testAKickedMemberIsLoggedAsKickedWithModeratorAndReason(): void
+    {
+        $urls = [];
+        $logged = $this->runListener('GUILD_MEMBER_REMOVE', $this->part(Member::class, ['guild_id' => '100', 'id' => '42', 'user' => '<@42>']), function ($endpoint) use (&$urls) {
+            $urls[] = $url = (string) $endpoint;
+
+            return resolve((object) ['audit_log_entries' => str_contains($url, 'action_type=' . Entry::MEMBER_KICK)
+                ? [entry('1', Entry::MEMBER_KICK, '42', microtime(true), 'rude')]
+                : []]);
+        });
+
+        $this->assertSame(['GUILD_MEMBER_REMOVE', '100', "Member kicked: <@42>\nBy: <@7>\nReason: rude"], $logged);
+        // Kicks and bans are looked up separately, so neither can be crowded out by the other.
+        $this->assertCount(2, $urls);
+        $this->assertStringContainsString('action_type=' . Entry::MEMBER_KICK, $urls[0]);
+        $this->assertStringContainsString('action_type=' . Entry::MEMBER_BAN_ADD, $urls[1]);
+    }
+
+    public function testAMemberRemovedByABanIsNotLoggedAsKicked(): void
+    {
+        $logged = $this->runListener('GUILD_MEMBER_REMOVE', $this->part(Member::class, ['guild_id' => '100', 'id' => '42', 'user' => '<@42>']), fn ($endpoint) => resolve((object) [
+            'audit_log_entries' => str_contains((string) $endpoint, 'action_type=' . Entry::MEMBER_BAN_ADD)
+                ? [entry('1', Entry::MEMBER_BAN_ADD, '42', microtime(true), 'spam')]
+                : [],
+        ]));
+
+        $this->assertSame(['GUILD_MEMBER_REMOVE', '100', 'Member removed by a ban: <@42>'], $logged);
+    }
+
+    public function testAMemberWithNoMatchingEntryIsLoggedAsLeaving(): void
+    {
+        // Another member's kick is no reason to call this one kicked.
+        $logged = $this->runListener('GUILD_MEMBER_REMOVE', $this->part(Member::class, ['guild_id' => '100', 'id' => '42', 'user' => '<@42>']), fn () => resolve((object) [
+            'audit_log_entries' => [entry('1', Entry::MEMBER_KICK, '999', microtime(true))],
+        ]));
+
+        $this->assertSame(['GUILD_MEMBER_REMOVE', '100', 'Member left: <@42>'], $logged);
+    }
+
+    public function testABanIsLoggedWithModeratorAndReason(): void
+    {
+        $urls = [];
+        $logged = $this->runListener('GUILD_BAN_ADD', $this->part(Ban::class, ['guild_id' => '100', 'user_id' => '42', 'user' => '<@42>']), function ($endpoint) use (&$urls) {
+            $urls[] = (string) $endpoint;
+
+            return resolve((object) ['audit_log_entries' => [entry('1', Entry::MEMBER_BAN_ADD, '42', microtime(true), 'spam')]]);
+        });
+
+        $this->assertSame(['GUILD_BAN_ADD', '100', "User banned: <@42>\nBy: <@7>\nReason: spam"], $logged);
+        $this->assertSame(['guilds/100/audit-logs?action_type=' . Entry::MEMBER_BAN_ADD . '&limit=10'], $urls);
+    }
+
+    /**
+     * Wires the default listener for `$event` to a Discord client whose audit log answers with `$get`,
+     * fires it with `$part`, and returns the event, guild and line it logged.
+     *
+     * @return array{string, string, string}|null
+     */
+    private function runListener(string $event, object $part, callable $get): ?array
+    {
+        $host = new class () {
+            use EventLoggerTrait;
+
+            public ?array $logged = null;
+
+            public function logEvent(Discord $discord, string $event, string $guild_id, object|string $content, ?object $old_content = null, ?MessageBuilder $builder = null): PromiseInterface
+            {
+                $this->logged = [$event, $guild_id, str_replace(PHP_EOL, "\n", (string) $content)];
+
+                return resolve(null);
+            }
+        };
+
+        $discord = $this->discordReturning($get);
+        $host->afterConstruct($discord, [$event]);
+        ($this->listeners[$event])($part, $discord);
+
+        return $host->logged;
+    }
+
+    /**
+     * A gateway part whose attributes read as `$attributes`.
+     *
+     * @template T of object
+     *
+     * @param class-string<T> $class
+     *
+     * @return T
+     */
+    private function part(string $class, array $attributes): object
+    {
+        $part = $this->getMockBuilder($class)->disableOriginalConstructor()->onlyMethods(['__get'])->getMock();
+        $part->method('__get')->willReturnCallback(fn (string $key) => $attributes[$key] ?? null);
+
+        return $part;
+    }
+
     /**
      * A Discord client whose HTTP GET answers with `$get`, and whose loop runs timers at once.
      */
@@ -152,9 +256,14 @@ final class AuditLogTest extends TestCase
             return $this->getMockBuilder(TimerInterface::class)->getMock();
         });
 
-        $discord = $this->getMockBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods(['getHttpClient', 'getLoop'])->getMock();
+        $discord = $this->getMockBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods(['getHttpClient', 'getLoop', 'on'])->getMock();
         $discord->method('getHttpClient')->willReturn($http);
         $discord->method('getLoop')->willReturn($loop);
+        $discord->method('on')->willReturnCallback(function (string $event, callable $listener) use ($discord) {
+            $this->listeners[$event] = $listener;
+
+            return $discord;
+        });
 
         return $discord;
     }

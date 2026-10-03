@@ -26,6 +26,7 @@ use EmbedBuilder\EmbedBuilder;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 
+use function React\Promise\all;
 use function React\Promise\reject;
 use function React\Promise\resolve;
 
@@ -394,15 +395,22 @@ trait EventLoggerTrait
      */
     public function findAuditLogEntry(Discord $discord, string $guild_id, array $action_types, string $target_id, bool $retry = true): PromiseInterface
     {
-        $endpoint = Endpoint::bind(Endpoint::AUDIT_LOG, $guild_id);
-        if (count($action_types) === 1) {
-            $endpoint->addQuery('action_type', $action_types[0]);
-        }
-        $endpoint->addQuery('limit', 10);
+        // One request per action type: an unfiltered page of recent entries could be filled by unrelated
+        // actions in a busy guild, crowding out the kick or ban being looked for.
+        $requests = array_map(function (int $action_type) use ($discord, $guild_id): PromiseInterface {
+            $endpoint = Endpoint::bind(Endpoint::AUDIT_LOG, $guild_id);
+            $endpoint->addQuery('action_type', $action_type);
+            $endpoint->addQuery('limit', 10);
 
-        return $discord->getHttpClient()->get($endpoint)->then(
-            function ($response) use ($discord, $guild_id, $action_types, $target_id, $retry): PromiseInterface {
-                $entry = self::matchAuditLogEntry((array) ($response->audit_log_entries ?? []), $action_types, $target_id);
+            return $discord->getHttpClient()->get($endpoint);
+        }, $action_types);
+
+        return all($requests)->then(
+            function (array $responses) use ($discord, $guild_id, $action_types, $target_id, $retry): PromiseInterface {
+                $entries = array_merge(...array_map(static fn ($response) => (array) ($response->audit_log_entries ?? []), $responses));
+                // Newest first across all the responses, as matchAuditLogEntry() expects.
+                usort($entries, static fn (object $a, object $b) => ((int) $b->id) <=> ((int) $a->id));
+                $entry = self::matchAuditLogEntry($entries, $action_types, $target_id);
                 if ($entry || ! $retry) {
                     return resolve($entry);
                 }
@@ -455,6 +463,19 @@ trait EventLoggerTrait
         }
 
         return $line . PHP_EOL . 'Reason: ' . (($entry->reason ?? '') !== '' ? $entry->reason : 'No reason given');
+    }
+
+    /**
+     * Whether a member left, was kicked or was removed by a ban, from the audit log entry that
+     * removed them, if any.
+     */
+    public static function describeMemberRemoval(string $user, ?object $entry): string
+    {
+        return match ($entry?->action_type) {
+            Entry::MEMBER_KICK => self::describeAuditLogEntry("Member kicked: {$user}", $entry),
+            Entry::MEMBER_BAN_ADD => "Member removed by a ban: {$user}",
+            default => "Member left: {$user}",
+        };
     }
 
     /**
@@ -581,11 +602,7 @@ trait EventLoggerTrait
                 $member->guild_id,
                 [Entry::MEMBER_KICK, Entry::MEMBER_BAN_ADD],
                 $member->id,
-                fn (?object $entry) => match ($entry?->action_type) {
-                    Entry::MEMBER_KICK => self::describeAuditLogEntry("Member kicked: {$member->user}", $entry),
-                    Entry::MEMBER_BAN_ADD => "Member removed by a ban: {$member->user}",
-                    default => "Member left: {$member->user}",
-                }
+                fn (?object $entry) => self::describeMemberRemoval((string) $member->user, $entry)
             );
         }
 
