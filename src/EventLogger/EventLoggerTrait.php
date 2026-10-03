@@ -16,13 +16,17 @@ use Discord\Helpers\Collection;
 use Discord\Parts\Part;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Channel\Message;
+use Discord\Http\Endpoint;
+use Discord\Parts\Guild\AuditLog\Entry;
 use Discord\Parts\Guild\Ban;
 use Discord\Parts\Guild\Role;
 use Discord\Parts\User\Member;
 use Discord\Parts\User\User;
 use EmbedBuilder\EmbedBuilder;
+use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 
+use function React\Promise\all;
 use function React\Promise\reject;
 use function React\Promise\resolve;
 
@@ -36,6 +40,12 @@ trait EventLoggerTrait
     private const string GITHUB = 'https://github.com/valgorithms/discordphp-eventlogger';
     private const string CREDITS = 'DiscordPHP EventLogger by Valithor Obsidion';
     private const string ENV_GUILD_CHANNELS = 'DISCORDPHP_EVENTLOGGER_GUILD_CHANNELS';
+    /** Milliseconds from the Unix epoch to Discord's, for reading a snowflake's timestamp. */
+    private const int DISCORD_EPOCH = 1420070400000;
+    /** Seconds an audit log entry may predate its gateway event and still be taken as its cause. */
+    private const int AUDIT_LOG_MAX_AGE = 15;
+    /** Seconds to wait before looking for an audit log entry a second time. */
+    private const float AUDIT_LOG_RETRY_DELAY = 1.5;
     private readonly string $footer;
     private Discord $discord;
     private bool $setup = false;
@@ -372,6 +382,122 @@ trait EventLoggerTrait
         return json_encode($value) ?: get_debug_type($value);
     }
 
+    /**
+     * Finds the audit log entry for a moderation action that just happened, so its log line can say who
+     * did it and why. Resolves null when there is none, or when the bot lacks View Audit Log.
+     *
+     * Discord can deliver the gateway event before the entry is readable, so a miss is retried once
+     * after {@see AUDIT_LOG_RETRY_DELAY} seconds.
+     *
+     * @param list<int> $action_types Entry action types to accept (Entry::MEMBER_BAN_ADD, ...).
+     *
+     * @return PromiseInterface<object|null> The raw audit log entry.
+     */
+    public function findAuditLogEntry(Discord $discord, string $guild_id, array $action_types, string $target_id, bool $retry = true): PromiseInterface
+    {
+        // One request per action type: an unfiltered page of recent entries could be filled by unrelated
+        // actions in a busy guild, crowding out the kick or ban being looked for.
+        $requests = array_map(function (int $action_type) use ($discord, $guild_id): PromiseInterface {
+            $endpoint = Endpoint::bind(Endpoint::AUDIT_LOG, $guild_id);
+            $endpoint->addQuery('action_type', $action_type);
+            $endpoint->addQuery('limit', 10);
+
+            return $discord->getHttpClient()->get($endpoint);
+        }, $action_types);
+
+        return all($requests)->then(
+            function (array $responses) use ($discord, $guild_id, $action_types, $target_id, $retry): PromiseInterface {
+                $entries = array_merge(...array_map(static fn ($response) => (array) ($response->audit_log_entries ?? []), $responses));
+                // Newest first across all the responses, as matchAuditLogEntry() expects.
+                usort($entries, static fn (object $a, object $b) => ((int) $b->id) <=> ((int) $a->id));
+                $entry = self::matchAuditLogEntry($entries, $action_types, $target_id);
+                if ($entry || ! $retry) {
+                    return resolve($entry);
+                }
+
+                $deferred = new Deferred();
+                $discord->getLoop()->addTimer(self::AUDIT_LOG_RETRY_DELAY, fn () => $deferred->resolve(
+                    $this->findAuditLogEntry($discord, $guild_id, $action_types, $target_id, false)
+                ));
+
+                return $deferred->promise();
+            },
+            fn (\Throwable $e) => null
+        );
+    }
+
+    /**
+     * The newest entry of one of the action types against the target, if it is recent enough to belong
+     * to the event being logged rather than an earlier one against the same user.
+     *
+     * @param array<object>  $entries      Raw `audit_log_entries`, newest first.
+     * @param list<int>      $action_types
+     * @param float|null     $now          Unix time in seconds; defaults to now.
+     */
+    public static function matchAuditLogEntry(array $entries, array $action_types, string $target_id, ?float $now = null): ?object
+    {
+        $now ??= microtime(true);
+
+        foreach ($entries as $entry) {
+            if (($entry->target_id ?? null) !== $target_id || ! in_array($entry->action_type ?? null, $action_types, true)) {
+                continue;
+            }
+            $created = ((((int) $entry->id) >> 22) + self::DISCORD_EPOCH) / 1000;
+
+            return $now - $created <= self::AUDIT_LOG_MAX_AGE ? $entry : null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Appends who took the action and their reason to a log line.
+     */
+    public static function describeAuditLogEntry(string $line, ?object $entry): string
+    {
+        if (! $entry) {
+            return $line;
+        }
+        if ($executor = $entry->user_id ?? null) {
+            $line .= PHP_EOL . "By: <@{$executor}>";
+        }
+
+        return $line . PHP_EOL . 'Reason: ' . (($entry->reason ?? '') !== '' ? $entry->reason : 'No reason given');
+    }
+
+    /**
+     * Whether a member left, was kicked or was removed by a ban, from the audit log entry that
+     * removed them, if any.
+     */
+    public static function describeMemberRemoval(string $user, ?object $entry): string
+    {
+        return match ($entry?->action_type) {
+            Entry::MEMBER_KICK => self::describeAuditLogEntry("Member kicked: {$user}", $entry),
+            Entry::MEMBER_BAN_ADD => "Member removed by a ban: {$user}",
+            default => "Member left: {$user}",
+        };
+    }
+
+    /**
+     * Logs a moderation event, with the moderator and reason from the audit log when it has them.
+     *
+     * @param callable(?object): string $describe Builds the log line from the matching entry, or null.
+     */
+    private function logModerationEvent(Discord $discord, string $event, string $guild_id, array $action_types, string $target_id, callable $describe): PromiseInterface
+    {
+        return $this->findAuditLogEntry($discord, $guild_id, $action_types, $target_id)->then(
+            fn (?object $entry) => $this->logEvent(
+                $discord,
+                $event,
+                $guild_id,
+                $describe($entry),
+                null,
+                // The line mentions the moderator; don't ping them for it.
+                MessageBuilder::new()->setAllowedMentions(['parse' => []])
+            )
+        );
+    }
+
     /*
      * Attempted to initialize the log Guild and Channel IDs after the object construction.
      *
@@ -438,20 +564,24 @@ trait EventLoggerTrait
         }
 
         if (!isset($this->event_listeners['GUILD_BAN_ADD']) && isset($eventKeys['GUILD_BAN_ADD'])) {
-            $this->event_listeners['GUILD_BAN_ADD'] = fn (Ban $ban, Discord $discord) => $this->logEvent(
+            $this->event_listeners['GUILD_BAN_ADD'] = fn (Ban $ban, Discord $discord) => $this->logModerationEvent(
                 $discord,
                 'GUILD_BAN_ADD',
                 $ban->guild_id,
-                "User banned: {$ban->user}"
+                [Entry::MEMBER_BAN_ADD],
+                $ban->user_id,
+                fn (?object $entry) => self::describeAuditLogEntry("User banned: {$ban->user}", $entry)
             );
         }
 
         if (!isset($this->event_listeners['GUILD_BAN_REMOVE']) && isset($eventKeys['GUILD_BAN_REMOVE'])) {
-            $this->event_listeners['GUILD_BAN_REMOVE'] = fn (Ban $ban, Discord $discord) => $this->logEvent(
+            $this->event_listeners['GUILD_BAN_REMOVE'] = fn (Ban $ban, Discord $discord) => $this->logModerationEvent(
                 $discord,
                 'GUILD_BAN_REMOVE',
                 $ban->guild_id,
-                "User unbanned: {$ban->user}"
+                [Entry::MEMBER_BAN_REMOVE],
+                $ban->user_id,
+                fn (?object $entry) => self::describeAuditLogEntry("User unbanned: {$ban->user}", $entry)
             );
         }
 
@@ -465,11 +595,14 @@ trait EventLoggerTrait
         }
 
         if (!isset($this->event_listeners['GUILD_MEMBER_REMOVE']) && isset($eventKeys['GUILD_MEMBER_REMOVE'])) {
-            $this->event_listeners['GUILD_MEMBER_REMOVE'] = fn (Member $member, Discord $discord) => $this->logEvent(
+            // A kick or a ban also removes the member; the audit log tells them apart from leaving.
+            $this->event_listeners['GUILD_MEMBER_REMOVE'] = fn (Member $member, Discord $discord) => $this->logModerationEvent(
                 $discord,
                 'GUILD_MEMBER_REMOVE',
                 $member->guild_id,
-                "Member left: {$member->user}"
+                [Entry::MEMBER_KICK, Entry::MEMBER_BAN_ADD],
+                $member->id,
+                fn (?object $entry) => self::describeMemberRemoval((string) $member->user, $entry)
             );
         }
 
